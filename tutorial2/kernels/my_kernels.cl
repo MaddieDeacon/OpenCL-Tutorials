@@ -4,13 +4,56 @@ kernel void identity(global const uchar* A, global uchar* B) {
 	B[id] = A[id];
 }
 
+kernel void invert(global const uchar* A, global uchar* B) {
+	int id = get_global_id(0);
+	int image_size = get_global_size(0)/3; //each image consists of 3 colour channels
+	int colour_channel = id / image_size; // 0 - red, 1 - green, 2 - blue
+
+	if (colour_channel == 1) {
+		B[id] = 255 - A[id];
+	}
+	else {
+		B[id] = A[id];
+	}
+}
+
 kernel void filter_r(global const uchar* A, global uchar* B) {
 	int id = get_global_id(0);
 	int image_size = get_global_size(0)/3; //each image consists of 3 colour channels
 	int colour_channel = id / image_size; // 0 - red, 1 - green, 2 - blue
 
 	//this is just a copy operation, modify to filter out the individual colour channels
-	B[id] = A[id];
+	if (colour_channel == 2) {
+		B[id] = A[id];
+	}
+	else {
+		B[id] = 0;
+	}
+}
+
+kernel void rgb2grey(global const uchar* A, global uchar* B) {
+	int id = get_global_id(0);
+	int image_size = get_global_size(0)/3; //each image consists of 3 colour channels
+	int colour_channel = id / image_size; // 0 - red, 1 - green, 2 - blue
+
+
+	if (colour_channel == 0) {
+		B[id] = A[id] * 0.2126;
+	} else 
+	if (colour_channel == 1) {
+		B[id] = A[id] * 0.7152;
+	} else {
+		B[id] = A[id] * 0.0722;
+	}
+
+	if (colour_channel == 0) {
+		B[id] = 255 - ((A[id] * 0.2126) + (A[id + image_size] * 0.7152) + (A[id + (image_size * 2)] * 0.0722));
+	} else 
+	if (colour_channel == 1) {
+		B[id] = 255 - ((A[id - image_size] * 0.2126) + (A[id] * 0.7152) + (A[id + image_size] * 0.0722));
+	} else {
+		B[id] = 255 - ((A[id - (image_size * 2)] * 0.2126) + (A[id - image_size] * 0.7152) + (A[id] * 0.0722));
+	}
 }
 
 //simple ND identity kernel
@@ -44,11 +87,16 @@ kernel void avg_filterND(global const uchar* A, global uchar* B) {
 
 	uint result = 0;
 
-	for (int i = (x-1); i <= (x+1); i++)
-	for (int j = (y-1); j <= (y+1); j++) 
-		result += A[i + j*width + c*image_size];
+	//simple boundary handling - just copy the original pixel
+	if ((x == 0) || (x == width-1) || (y == 0) || (y == height-1)) {
+		result = A[id];	
+	} else {
+		for (int i = (x-1); i <= (x+1); i++)
+		for (int j = (y-1); j <= (y+1); j++) 
+			result += A[i + j*width + c*image_size];
 
-	result /= 9;
+		result /= 9;
+	}
 
 	B[id] = (uchar)result;
 }
@@ -68,9 +116,14 @@ kernel void convolutionND(global const uchar* A, global uchar* B, constant float
 
 	float result = 0;
 
-	for (int i = (x-1); i <= (x+1); i++)
-	for (int j = (y-1); j <= (y+1); j++) 
-		result += A[i + j*width + c*image_size]*mask[i-(x-1) + j-(y-1)];
+	//simple boundary handling - just copy the original pixel
+	if ((x == 0) || (x == width-1) || (y == 0) || (y == height-1)) {
+		result = A[id];	
+	} else {
+		for (int i = (x-1); i <= (x+1); i++)
+		for (int j = (y-1); j <= (y+1); j++) 
+			result += A[i + j*width + c*image_size]*mask[i-(x-1) + j-(y-1)];
+	}
 
 	B[id] = (uchar)result;
 }
