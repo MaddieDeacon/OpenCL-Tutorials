@@ -1,6 +1,5 @@
 #include <iostream>
 #include <vector>
-#include <iomanip> //for floating point 
 #include "Utils.h" 
 #include "CImg.h"
 
@@ -21,7 +20,7 @@ int main(int argc, char **argv) {
     int platform_id = 0;
     int device_id = 0;
     //deafult settings unless stated 
-    std::string image_filename = "mdr16.ppm"; 
+    std::string image_filename = "test.pgm"; 
     int num_bins = 256; 
     std::string scan_kernel_type = "bl"; 
 
@@ -293,8 +292,6 @@ int main(int argc, char **argv) {
 double combined_total_time = 0.0;
 std::string scan_name = (scan_kernel_type == "bl") ? "Blelloch" : "Hillis-Steele";
 for (int c = 0; c < channels; c++) {
-    // Set precision for floating-point output
-    std::cout << std::fixed << std::setprecision(9);
 
     std::cout << "\nPerformance Metrics (seconds) and Complexity for Channel " << (c + 1) 
               << " (Bins: " << num_bins << ", Scan Kernel: " << scan_name << "):\n";
