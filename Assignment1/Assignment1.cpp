@@ -168,7 +168,7 @@ int main(int argc, char **argv) {
             hist_kernel.setArg(2, num_bins);
 
             // Define local work-group size
-            size_t local_size = 256; // Adjust based on device capabilities
+            size_t local_size = 1024; //biggest possible based on wokr group size 
             if (num_bins > local_size) {
                 std::cerr << "Error: num_bins (" << num_bins << ") exceeds local work-group size (" << local_size << ")" << std::endl;
                 return 1;
