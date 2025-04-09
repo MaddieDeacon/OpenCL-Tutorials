@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vector>
-#include "Utils.h"
+#include <iomanip> // For std::setprecision and std::fixed
+#include "Utils.h" // Assuming this contains OpenCL utility functions like GetContext, AddSources, etc.
 #include "CImg.h"
 
 using namespace cimg_library;
@@ -11,40 +12,77 @@ void print_help() {
     std::cerr << "  -d : select device" << std::endl;
     std::cerr << "  -l : list all platforms and devices" << std::endl;
     std::cerr << "  -f : input image file" << std::endl;
+    std::cerr << "  -b : number of bins (default 256)" << std::endl;
+    std::cerr << "  -s : scan kernel (bl for Blelloch, hs for Hillis-Steele, default bl)" << std::endl;
     std::cerr << "  -h : print this message" << std::endl;
 }
 
 int main(int argc, char **argv) {
     int platform_id = 0;
     int device_id = 0;
-    string image_filename = "test.pgm"; 
+    std::string image_filename = "mdr16.ppm"; // Default to 16-bit RGB PPM
+    int num_bins = 256; // Default number of bins
+    std::string scan_kernel_type = "bl"; // Default to Blelloch
 
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-p") == 0) && (i < (argc - 1))) { platform_id = atoi(argv[++i]); }
         else if ((strcmp(argv[i], "-d") == 0) && (i < (argc - 1))) { device_id = atoi(argv[++i]); }
         else if (strcmp(argv[i], "-l") == 0) { std::cout << ListPlatformsDevices() << std::endl; }
         else if ((strcmp(argv[i], "-f") == 0) && (i < (argc - 1))) { image_filename = argv[++i]; }
+        else if ((strcmp(argv[i], "-b") == 0) && (i < (argc - 1))) { num_bins = atoi(argv[++i]); }
+        else if ((strcmp(argv[i], "-s") == 0) && (i < (argc - 1))) { scan_kernel_type = argv[++i]; }
         else if (strcmp(argv[i], "-h") == 0) { print_help(); return 0; }
+    }
+
+    if (num_bins <= 0) {
+        std::cerr << "Error: Number of bins must be positive" << std::endl;
+        return 1;
+    }
+    if (scan_kernel_type != "bl" && scan_kernel_type != "hs") {
+        std::cerr << "Error: Scan kernel must be 'bl' (Blelloch) or 'hs' (Hillis-Steele)" << std::endl;
+        return 1;
     }
 
     cimg::exception_mode(0);
 
     try {
-        //Load input image, deafult is PGM tho 
-        CImg<unsigned char> image_input(image_filename.c_str());
+        // Load input image (16-bit or 8-bit with scaling)
+        CImg<unsigned short> image_input;
+
+        // Check file header to determine bit depth
+        FILE* file = fopen(image_filename.c_str(), "rb");
+        if (!file) throw CImgIOException("Cannot open file");
+        
+        char magic[3] = {0};
+        int maxval = 0;
+        fscanf(file, "%2s %*d %*d %d", magic, &maxval);
+        fclose(file);
+
+        bool is_8bit = (maxval <= 255);
+
+        if (is_8bit) {
+            CImg<unsigned char> image_8bit(image_filename.c_str());
+            image_input.assign(image_8bit.width(), image_8bit.height(), 1, image_8bit.spectrum());
+            cimg_forXYC(image_input, x, y, c) {
+                image_input(x, y, 0, c) = (unsigned short)(image_8bit(x, y, 0, c) * 257); // Scale 0-255 to 0-65535
+            }
+        } else {
+            image_input = CImg<unsigned short>(image_filename.c_str());
+        }
+
         CImgDisplay disp_input(image_input, "Input Image");
 
-        //OpenCL
+        // Setup OpenCL
         cl::Context context = GetContext(platform_id, device_id);
         std::cout << "Running on " << GetPlatformName(platform_id) << ", " << GetDeviceName(platform_id, device_id) << std::endl;
         cl::CommandQueue queue(context, context.getInfo<CL_CONTEXT_DEVICES>()[0], CL_QUEUE_PROFILING_ENABLE);
 
-        //load 
+        // Load and build kernel code
         cl::Program::Sources sources;
         AddSources(sources, "kernels/my_kernels.cl");
         cl::Program program(context, sources);
         try {
-            program.build(); //and build kernerl
+            program.build();
         }
         catch (const cl::Error& err) {
             std::cout << "Build Status: " << program.getBuildInfo<CL_PROGRAM_BUILD_STATUS>(context.getInfo<CL_CONTEXT_DEVICES>()[0]) << std::endl;
@@ -52,35 +90,37 @@ int main(int argc, char **argv) {
             throw err;
         }
 
-        //intesity computuion 
+        // Image properties
         size_t width = image_input.width();
         size_t height = image_input.height();
-        size_t channels = image_input.spectrum();
-        //size of one channel 
-        size_t image_size = width * height; 
-        CImg<unsigned char> intensity(image_size, 1, 1, 1, 0);
-        //dependds on the chanel size 
-        if (channels == 1) { // PGM
-            intensity = image_input;
-        } else if (channels == 3) { // PPM
+        size_t channels = image_input.spectrum(); // 1 for grayscale, 3 for RGB
+        size_t image_size = width * height; // Size of one channel
+
+        // Separate channels
+        std::vector<CImg<unsigned short>> input_channels(channels);
+        for (int c = 0; c < channels; c++) {
+            input_channels[c] = CImg<unsigned short>(width, height, 1, 1);
             cimg_forXY(image_input, x, y) {
-                unsigned char r = image_input(x, y, 0, 0);
-                unsigned char g = image_input(x, y, 0, 1);
-                unsigned char b = image_input(x, y, 0, 2);
-                intensity(x + y * width) = (unsigned char)(0.299f * r + 0.587f * g + 0.114f * b); // Luminance
+                input_channels[c](x, y) = image_input(x, y, 0, c);
             }
-        } else {
-            throw std::runtime_error("Unsupported number of channels");
         }
 
-        //buffers for devices 
-        cl::Buffer dev_image_input(context, CL_MEM_READ_ONLY, image_size); 
-        cl::Buffer dev_image_output(context, CL_MEM_WRITE_ONLY, image_size * channels); // Complete Full output
-        cl::Buffer dev_histogram(context, CL_MEM_READ_WRITE, 256 * sizeof(unsigned int));
-        cl::Buffer dev_cum_histogram(context, CL_MEM_READ_WRITE, 256 * sizeof(unsigned int));
-        cl::Buffer dev_lut(context, CL_MEM_READ_WRITE, 256 * sizeof(unsigned char));
+        // Device buffers for each channel
+        std::vector<cl::Buffer> dev_image_input(channels);
+        std::vector<cl::Buffer> dev_image_output(channels);
+        std::vector<cl::Buffer> dev_histogram(channels);
+        std::vector<cl::Buffer> dev_cum_histogram(channels);
+        std::vector<cl::Buffer> dev_lut(channels);
 
-        //Timing and metrics per step for output later 
+        for (int c = 0; c < channels; c++) {
+            dev_image_input[c] = cl::Buffer(context, CL_MEM_READ_ONLY, image_size * sizeof(unsigned short));
+            dev_image_output[c] = cl::Buffer(context, CL_MEM_WRITE_ONLY, image_size * sizeof(unsigned short));
+            dev_histogram[c] = cl::Buffer(context, CL_MEM_READ_WRITE, num_bins * sizeof(unsigned int));
+            dev_cum_histogram[c] = cl::Buffer(context, CL_MEM_READ_WRITE, num_bins * sizeof(unsigned int));
+            dev_lut[c] = cl::Buffer(context, CL_MEM_READ_WRITE, 65536 * sizeof(unsigned short));
+        }
+
+        // Timing and metrics per step (per channel)
         struct StepMetrics {
             double transfer_time = 0;
             double kernel_time = 0;
@@ -88,197 +128,262 @@ int main(int argc, char **argv) {
             size_t work = 0;
             size_t span = 0;
         };
-        StepMetrics step1, step2, step3, step4, step5;
-        const int BINS = 256;
+        std::vector<std::vector<StepMetrics>> metrics(channels, std::vector<StepMetrics>(5));
 
-        //step 1: Copy intensity to device
-        cl::Event event1a, event1b;
-        queue.enqueueWriteBuffer(dev_image_input, CL_TRUE, 0, image_size, intensity.data(), nullptr, &event1a);
-        std::vector<unsigned int> zeros(BINS, 0);
-        queue.enqueueWriteBuffer(dev_histogram, CL_TRUE, 0, BINS * sizeof(unsigned int), zeros.data(), nullptr, &event1b);
-        event1a.wait();
-        event1b.wait();
-        step1.transfer_time = (event1a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event1a.getProfilingInfo<CL_PROFILING_COMMAND_START>() +
-                               event1b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event1b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
-        step1.total_time = step1.transfer_time;
-        step1.work = image_size + BINS;
-        step1.span = 1;
+        // Visualization displays for each channel
+        std::vector<CImgDisplay> disp_hist(channels);
+        std::vector<CImgDisplay> disp_cum_hist(channels);
+        std::vector<CImgDisplay> disp_norm_cum_hist(channels);
 
-        // Step 2 Calculating the histogram
-        cl::Event event2a, event2b;
-        cl::Kernel hist_kernel(program, "hist_simple");
-        hist_kernel.setArg(0, dev_image_input);
-        hist_kernel.setArg(1, dev_histogram);
-        hist_kernel.setArg(2, BINS);
-        queue.enqueueNDRangeKernel(hist_kernel, cl::NullRange, cl::NDRange(image_size), cl::NullRange, nullptr, &event2a);
-        event2a.wait();
-        step2.kernel_time = (event2a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event2a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
+        // Get device properties for local memory and work-group size
+        cl::Device device = context.getInfo<CL_CONTEXT_DEVICES>()[0];
+        cl_ulong local_mem_size;
+        device.getInfo(CL_DEVICE_LOCAL_MEM_SIZE, &local_mem_size);
+        size_t max_work_group_size;
+        device.getInfo(CL_DEVICE_MAX_WORK_GROUP_SIZE, &max_work_group_size);
+        std::cout << "Local Memory Size: " << local_mem_size << " bytes, Max Work-Group Size: " << max_work_group_size << std::endl;
 
-        std::vector<unsigned int> histogram(BINS);
-        queue.enqueueReadBuffer(dev_histogram, CL_TRUE, 0, BINS * sizeof(unsigned int), histogram.data(), nullptr, &event2b);
-        event2b.wait();
-        step2.transfer_time = (event2b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event2b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
-        step2.total_time = step2.kernel_time + step2.transfer_time;
-        step2.work = image_size;
-        step2.span = 2;
+        // Process each channel
+        for (int c = 0; c < channels; c++) {
+            // Step 1: Copy channel data to device and initialize histogram
+            cl::Event event1a, event1b;
+            queue.enqueueWriteBuffer(dev_image_input[c], CL_TRUE, 0, image_size * sizeof(unsigned short), input_channels[c].data(), nullptr, &event1a);
+            std::vector<unsigned int> zeros(num_bins, 0);
+            queue.enqueueWriteBuffer(dev_histogram[c], CL_TRUE, 0, num_bins * sizeof(unsigned int), zeros.data(), nullptr, &event1b);
+            event1a.wait();
+            event1b.wait();
+            metrics[c][0].transfer_time = (event1a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event1a.getProfilingInfo<CL_PROFILING_COMMAND_START>() +
+                                           event1b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event1b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
+            metrics[c][0].total_time = metrics[c][0].transfer_time;
+            metrics[c][0].work = image_size + num_bins;
+            metrics[c][0].span = 1;
 
-        CImg<unsigned char> hist_img(256, 200, 1, 1, 0);
-        const unsigned char white[] = {255};
-        unsigned int max_hist = *std::max_element(histogram.begin(), histogram.end());
-        for (int x = 0; x < 256; x++) {
-            int height = (int)((histogram[x] / (float)max_hist) * 200);
-            hist_img.draw_line(x, 200, x, 200 - height, white);
-        }
-        CImgDisplay disp_hist(hist_img, "Intensity Histogram");
+            // Step 2: Calculate histogram with local memory
+            cl::Event event2a, event2b;
+            cl::Kernel hist_kernel(program, "hist_local");
 
-        // Step 3: Calculate cumulative histogram
-        cl::Event event3a, event3b;
-        cl::Kernel scan_kernel(program, "scan_bl");
-        scan_kernel.setArg(0, dev_histogram);
-        queue.enqueueNDRangeKernel(scan_kernel, cl::NullRange, cl::NDRange(BINS), cl::NullRange, nullptr, &event3a);
-        event3a.wait();
-        step3.kernel_time = (event3a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event3a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
+            // Set kernel arguments
+            hist_kernel.setArg(0, dev_image_input[c]);
+            hist_kernel.setArg(1, dev_histogram[c]);
+            hist_kernel.setArg(2, num_bins);
 
-        std::vector<unsigned int> cum_histogram(BINS);
-        queue.enqueueReadBuffer(dev_histogram, CL_TRUE, 0, BINS * sizeof(unsigned int), cum_histogram.data(), nullptr, &event3b);
-        event3b.wait();
-        step3.transfer_time = (event3b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event3b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
-        step3.total_time = step3.kernel_time + step3.transfer_time;
-        step3.work = 2 * BINS - 1;
-        step3.span = (size_t)log2((double)BINS);
+            // Define local work-group size
+            size_t local_size = 256; // Adjust based on device capabilities
+            if (num_bins > local_size) {
+                std::cerr << "Error: num_bins (" << num_bins << ") exceeds local work-group size (" << local_size << ")" << std::endl;
+                return 1;
+            }
+            if (num_bins * sizeof(int) > local_mem_size) {
+                std::cerr << "Error: Local histogram size (" << num_bins * sizeof(int) << " bytes) exceeds device local memory (" << local_mem_size << " bytes)" << std::endl;
+                return 1;
+            }
+            if (local_size > max_work_group_size) {
+                local_size = max_work_group_size;
+                std::cout << "Adjusted local_size to max_work_group_size: " << local_size << std::endl;
+            }
+            hist_kernel.setArg(3, cl::Local(num_bins * sizeof(int))); // Local memory for local_hist
 
-        CImg<unsigned char> cum_hist_img(256, 200, 1, 1, 0);
-        unsigned int max_cum_hist = cum_histogram[BINS - 1];
-        for (int x = 0; x < 256; x++) {
-            int height = (int)((cum_histogram[x] / (float)max_cum_hist) * 200);
-            cum_hist_img.draw_line(x, 200, x, 200 - height, white);
-        }
-        CImgDisplay disp_cum_hist(cum_hist_img, "Cumulative Histogram");
+            // Calculate global work size
+            size_t global_size = image_size;
+            if (global_size % local_size != 0) {
+                global_size = ((global_size / local_size) + 1) * local_size; // Round up
+            }
 
-        //Step 4: NormalizING LUT
-        cl::Event event4a, event4b;
-        float scale = 255.0f / (image_input.width() * image_input.height());
-        cl::Kernel normalize_kernel(program, "normalize_lut");
-        normalize_kernel.setArg(0, dev_histogram);
-        normalize_kernel.setArg(1, dev_lut);
-        normalize_kernel.setArg(2, scale);
-        queue.enqueueNDRangeKernel(normalize_kernel, cl::NullRange, cl::NDRange(BINS), cl::NullRange, nullptr, &event4a);
-        event4a.wait();
-        step4.kernel_time = (event4a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event4a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
+            // Launch kernel
+            queue.enqueueNDRangeKernel(hist_kernel, cl::NullRange, cl::NDRange(global_size), cl::NDRange(local_size), nullptr, &event2a);
+            event2a.wait();
+            metrics[c][1].kernel_time = (event2a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event2a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
 
-        std::vector<unsigned char> lut(BINS);
-        queue.enqueueReadBuffer(dev_lut, CL_TRUE, 0, BINS * sizeof(unsigned char), lut.data(), nullptr, &event4b);
-        event4b.wait();
-        step4.transfer_time = (event4b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event4b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
-        step4.total_time = step4.kernel_time + step4.transfer_time;
-        step4.work = BINS;
-        step4.span = 1;
+            std::vector<unsigned int> histogram(num_bins);
+            queue.enqueueReadBuffer(dev_histogram[c], CL_TRUE, 0, num_bins * sizeof(unsigned int), histogram.data(), nullptr, &event2b);
+            event2b.wait();
+            metrics[c][1].transfer_time = (event2b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event2b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
+            metrics[c][1].total_time = metrics[c][1].kernel_time + metrics[c][1].transfer_time;
+            metrics[c][1].work = image_size;
+            metrics[c][1].span = 2; // Initialization + merging
 
-        CImg<unsigned char> norm_cum_hist_img(256, 200, 1, 1, 0);
-        for (int x = 0; x < 256; x++) {
-            int height = (int)((lut[x] / 255.0f) * 200);
-            norm_cum_hist_img.draw_line(x, 200, x, 200 - height, white);
-        }
-        CImgDisplay disp_norm_cum_hist(norm_cum_hist_img, "Normalized Cumulative Histogram");
+            CImg<unsigned char> hist_img(num_bins, 200, 1, 1, 0);
+            const unsigned char white[] = {255};
+            unsigned int max_hist = *std::max_element(histogram.begin(), histogram.end());
+            for (int x = 0; x < num_bins; x++) {
+                int height = (int)((histogram[x] / (float)max_hist) * 200);
+                hist_img.draw_line(x, 200, x, 200 - height, white);
+            }
+            disp_hist[c] = CImgDisplay(hist_img, ("Histogram Channel " + std::to_string(c + 1)).c_str());
 
-        //step 5:applyING LUT to all channels
-        cl::Event event5a, event5b;
-        cl::Kernel backproject_kernel(program, "back_project");
-        backproject_kernel.setArg(0, dev_image_input);
-        backproject_kernel.setArg(1, dev_image_output);
-        backproject_kernel.setArg(2, dev_lut);
-        queue.enqueueNDRangeKernel(backproject_kernel, cl::NullRange, cl::NDRange(image_size), cl::NullRange, nullptr, &event5a);
-        event5a.wait();
-        step5.kernel_time = (event5a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event5a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
+            // Step 3: Calculate cumulative histogram
+            cl::Event event3a, event3b;
+            cl::Kernel scan_kernel(program, scan_kernel_type == "bl" ? "scan_bl" : "scan_hs");
+            scan_kernel.setArg(0, dev_histogram[c]);
+            scan_kernel.setArg(1, num_bins);
+            queue.enqueueNDRangeKernel(scan_kernel, cl::NullRange, cl::NDRange(num_bins), cl::NullRange, nullptr, &event3a);
+            event3a.wait();
+            metrics[c][2].kernel_time = (event3a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event3a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
 
-        std::vector<unsigned char> output_buffer(image_size * channels);
-        queue.enqueueReadBuffer(dev_image_output, CL_TRUE, 0, image_size * channels, output_buffer.data(), nullptr, &event5b);
-        event5b.wait();
-        step5.transfer_time = (event5b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event5b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
+            std::vector<unsigned int> cum_histogram(num_bins);
+            queue.enqueueReadBuffer(dev_histogram[c], CL_TRUE, 0, num_bins * sizeof(unsigned int), cum_histogram.data(), nullptr, &event3b);
+            event3b.wait();
+            metrics[c][2].transfer_time = (event3b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event3b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
+            metrics[c][2].total_time = metrics[c][2].kernel_time + metrics[c][2].transfer_time;
+            metrics[c][2].work = (scan_kernel_type == "bl") ? (2 * num_bins - 1) : (num_bins * log2((double)num_bins)); // Work differs: Blelloch O(n), HS O(n log n)
+            metrics[c][2].span = (size_t)log2((double)num_bins);
 
-        //Applying LUT
-        if (channels == 3) {
-            cimg_forXY(image_input, x, y) {
-                for (int c = 0; c < 3; c++) {
-                    unsigned char val = image_input(x, y, 0, c);
-                    output_buffer[(x + y * width) * 3 + c] = lut[val];
-                }
+            CImg<unsigned char> cum_hist_img(num_bins, 200, 1, 1, 0);
+            unsigned int max_cum_hist = cum_histogram[num_bins - 1];
+            for (int x = 0; x < num_bins; x++) {
+                int height = (int)((cum_histogram[x] / (float)max_cum_hist) * 200);
+                cum_hist_img.draw_line(x, 200, x, 200 - height, white);
+            }
+            disp_cum_hist[c] = CImgDisplay(cum_hist_img, ("Cumulative Histogram Channel " + std::to_string(c + 1)).c_str());
+
+            // Step 4: Normalize LUT
+            cl::Event event4a, event4b;
+            float scale = 65535.0f / (image_input.width() * image_input.height());
+            cl::Kernel normalize_kernel(program, "normalize_lut");
+            normalize_kernel.setArg(0, dev_histogram[c]);
+            normalize_kernel.setArg(1, dev_lut[c]);
+            normalize_kernel.setArg(2, scale);
+            normalize_kernel.setArg(3, num_bins);
+            queue.enqueueNDRangeKernel(normalize_kernel, cl::NullRange, cl::NDRange(65536), cl::NullRange, nullptr, &event4a);
+            event4a.wait();
+            metrics[c][3].kernel_time = (event4a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event4a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
+
+            std::vector<unsigned short> lut(65536);
+            queue.enqueueReadBuffer(dev_lut[c], CL_TRUE, 0, 65536 * sizeof(unsigned short), lut.data(), nullptr, &event4b);
+            event4b.wait();
+            metrics[c][3].transfer_time = (event4b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event4b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
+            metrics[c][3].total_time = metrics[c][3].kernel_time + metrics[c][3].transfer_time;
+            metrics[c][3].work = 65536;
+            metrics[c][3].span = 1;
+
+            CImg<unsigned char> norm_cum_hist_img(num_bins, 200, 1, 1, 0);
+            for (int x = 0; x < num_bins; x++) {
+                int lut_index = (int)((float)x / num_bins * 65536);
+                int height = (int)((lut[lut_index] / 65535.0f) * 200);
+                norm_cum_hist_img.draw_line(x, 200, x, 200 - height, white);
+            }
+            disp_norm_cum_hist[c] = CImgDisplay(norm_cum_hist_img, ("Normalized Cumulative Histogram Channel " + std::to_string(c + 1)).c_str());
+
+            // Step 5: Back projection
+            cl::Event event5a, event5b;
+            cl::Kernel backproject_kernel(program, "back_project");
+            backproject_kernel.setArg(0, dev_image_input[c]);
+            backproject_kernel.setArg(1, dev_image_output[c]);
+            backproject_kernel.setArg(2, dev_lut[c]);
+            queue.enqueueNDRangeKernel(backproject_kernel, cl::NullRange, cl::NDRange(image_size), cl::NullRange, nullptr, &event5a);
+            event5a.wait();
+            metrics[c][4].kernel_time = (event5a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event5a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
+
+            std::vector<unsigned short> output_buffer(image_size);
+            queue.enqueueReadBuffer(dev_image_output[c], CL_TRUE, 0, image_size * sizeof(unsigned short), output_buffer.data(), nullptr, &event5b);
+            event5b.wait();
+            metrics[c][4].transfer_time = (event5b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event5b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
+            metrics[c][4].total_time = metrics[c][4].kernel_time + metrics[c][4].transfer_time;
+
+            metrics[c][4].work = image_size;
+            metrics[c][4].span = 1;
+
+            // Store output back into input_channels
+            cimg_forXY(input_channels[c], x, y) {
+                input_channels[c](x, y) = output_buffer[x + y * width];
             }
         }
-        step5.total_time = step5.kernel_time + step5.transfer_time;
-        step5.work = image_size;
-        step5.span = 1;
 
-        // Display output
-        CImg<unsigned char> output_image(output_buffer.data(), width, height, 1, channels);
+        // Print timing and complexity results for each channel
+double combined_total_time = 0.0;
+std::string scan_name = (scan_kernel_type == "bl") ? "Blelloch" : "Hillis-Steele";
+for (int c = 0; c < channels; c++) {
+    // Set precision for floating-point output
+    std::cout << std::fixed << std::setprecision(9);
+
+    std::cout << "\nPerformance Metrics (seconds) and Complexity for Channel " << (c + 1) 
+              << " (Bins: " << num_bins << ", Scan Kernel: " << scan_name << "):\n";
+    std::cout << "\n";
+    std::cout << "1: Input Transfer and Initialization\n";
+    std::cout << "\n";
+    std::cout << "  Transfer Time: " << metrics[c][0].transfer_time << "\n";
+    std::cout << "  Kernel Time: " << metrics[c][0].kernel_time << "\n";
+    std::cout << "  Total Time: " << metrics[c][0].total_time << "\n";
+    std::cout << "  Work: " << metrics[c][0].work << " operations\n";
+    std::cout << "  Span: " << metrics[c][0].span << " steps\n";
+
+    std::cout << "\n"; //For readability 
+
+    std::cout << "2: Histogram Calculation\n";
+    std::cout << "\n";
+    std::cout << "  Transfer Time: " << metrics[c][1].transfer_time << "\n";
+    std::cout << "  Kernel Time: " << metrics[c][1].kernel_time << "\n";
+    std::cout << "  Total Time: " << metrics[c][1].total_time << "\n";
+    std::cout << "  Work: " << metrics[c][1].work << " operations\n";
+    std::cout << "  Span: " << metrics[c][1].span << " steps\n";
+
+    std::cout << "\n";
+
+    std::cout << "3: Cumulative Histogram (" << scan_name << ")\n";
+    std::cout << "\n";
+    std::cout << "  Transfer Time: " << metrics[c][2].transfer_time << "\n";
+    std::cout << "  Kernel Time: " << metrics[c][2].kernel_time << "\n";
+    std::cout << "  Total Time: " << metrics[c][2].total_time << "\n";
+    std::cout << "  Work: " << metrics[c][2].work << " operations\n";
+    std::cout << "  Span: " << metrics[c][2].span << " steps\n";
+
+    std::cout << "\n";
+
+    std::cout << "4: Normalize LUT\n";
+    std::cout << "\n";
+    std::cout << "  Transfer Time: " << metrics[c][3].transfer_time << "\n";
+    std::cout << "  Kernel Time: " << metrics[c][3].kernel_time << "\n";
+    std::cout << "  Total Time: " << metrics[c][3].total_time << "\n";
+    std::cout << "  Work: " << metrics[c][3].work << " operations\n";
+    std::cout << "  Span: " << metrics[c][3].span << " steps\n";
+
+    std::cout << "5: Back Projection\n";
+    std::cout << "\n";
+    std::cout << "  Transfer Time: " << metrics[c][4].transfer_time << "\n";
+    std::cout << "  Kernel Time: " << metrics[c][4].kernel_time << "\n";
+    std::cout << "  Total Time: " << metrics[c][4].total_time << "\n";
+    std::cout << "  Work: " << metrics[c][4].work << " operations\n";
+    std::cout << "  Span: " << metrics[c][4].span << " steps\n";
+
+    std::cout << "\n";
+
+    double overall_total_time = metrics[c][0].total_time + metrics[c][1].total_time + metrics[c][2].total_time + 
+                                metrics[c][3].total_time + metrics[c][4].total_time;
+    std::cout << "Overall Total Time for Channel " << (c + 1) << ": " << overall_total_time << " seconds\n";
+
+    combined_total_time += overall_total_time;
+}
+
+if (channels > 1) {
+    std::cout << "\nTotal Time for ALL Channels Combined (RGB Image, Scan Kernel: " << scan_name << "): " 
+              << combined_total_time << " seconds\n";
+}
+
+
+        // Combine channels into final image (moved after metrics output)
+        CImg<unsigned short> output_image(width, height, 1, channels);
+        cimg_forXY(output_image, x, y) {
+            for (int c = 0; c < channels; c++) {
+                output_image(x, y, 0, c) = input_channels[c](x, y);
+            }
+        }
         CImgDisplay disp_output(output_image, "Equalized Image");
 
-        //Results for each step
-        //1
-        std::cout << "Performance Metrics  in Seconds and Complexity:\n";
-        std::cout << "\n";
-        std::cout << "Input Transfer and Initialization\n";
-        std::cout << "  Transfer Time: " << step1.transfer_time << "\n";
-        std::cout << "  Kernel Time: " << step1.kernel_time << "\n";
-        std::cout << "  Total Time: " << step1.total_time << "\n";
-        std::cout << "  Span: " << step1.span << " steps\n";
-        std::cout << "  Work: " << step1.work << " operations\n";
-
-        std::cout << "\n"; //Looks nicer 
-
-        //2
-        std::cout << "Histogram Calculation\n";
-        std::cout << "  Transfer Time: " << step2.transfer_time << "\n";
-        std::cout << "  Kernel Time: " << step2.kernel_time << "\n";
-        std::cout << "  Total Time: " << step2.total_time << "\n";
-        std::cout << "  Span: " << step2.span << " steps\n";
-        std::cout << "  Work: " << step2.work << " operations\n";
-
-        std::cout << "\n";
-
-        //3
-        std::cout << "Cumulative Histogram\n";
-        std::cout << "  Transfer Time: " << step3.transfer_time << "\n";
-        std::cout << "  Kernel Time: " << step3.kernel_time << "\n";
-        std::cout << "  Total Time: " << step3.total_time << "\n";
-        std::cout << "  Span: " << step3.span << " steps\n";
-        std::cout << "  Work: " << step3.work << " operations\n";
-
-        std::cout << "\n";
-
-        //4
-        std::cout << "Normalize \n";
-        std::cout << "  Transfer Time: " << step4.transfer_time << "\n";
-        std::cout << "  Kernel Time: " << step4.kernel_time << "\n";
-        std::cout << "  Total Time: " << step4.total_time << "\n";
-        std::cout << "  Span: " << step4.span << " steps\n";
-        std::cout << "  Work: " << step4.work << " operations\n";
-
-        std::cout << "\n";
-
-        //5
-        std::cout << "Back Projection\n";
-        std::cout << "  Transfer Time: " << step5.transfer_time << "\n";
-        std::cout << "  Kernel Time: " << step5.kernel_time << "\n";
-        std::cout << "  Total Time: " << step5.total_time << "\n";
-        std::cout << "  Span: " << step5.span << " steps\n";
-        std::cout << "  Work: " << step5.work << " operations\n";
-
-        std::cout << "\n";
-
-        double overall_total_time = step1.total_time + step2.total_time + step3.total_time + step4.total_time + step5.total_time;
-        std::cout << "Overall Total Time: " << overall_total_time << " seconds\n";
-
-        //closing windows
-        while (!disp_input.is_closed() && !disp_output.is_closed() && 
-               !disp_hist.is_closed() && !disp_cum_hist.is_closed() && 
-               !disp_norm_cum_hist.is_closed() &&
-               !disp_input.is_keyESC() && !disp_output.is_keyESC()) {
+        // Wait for all windows to close
+        bool all_closed = false;
+        while (!all_closed) {
+            all_closed = disp_input.is_closed() && disp_output.is_closed();
+            for (int c = 0; c < channels; c++) {
+                all_closed &= disp_hist[c].is_closed() && disp_cum_hist[c].is_closed() && disp_norm_cum_hist[c].is_closed();
+            }
             disp_input.wait(1);
             disp_output.wait(1);
-            disp_hist.wait(1);
-            disp_cum_hist.wait(1);
-            disp_norm_cum_hist.wait(1);
+            for (int c = 0; c < channels; c++) {
+                disp_hist[c].wait(1);
+                disp_cum_hist[c].wait(1);
+                disp_norm_cum_hist[c].wait(1);
+            }
+            if (disp_input.is_keyESC() || disp_output.is_keyESC()) break;
         }
     }
     catch (const cl::Error& err) {
