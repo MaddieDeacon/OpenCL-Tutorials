@@ -1,7 +1,7 @@
 #include <iostream>
 #include <vector>
-#include <iomanip> // For std::setprecision and std::fixed
-#include "Utils.h" // Assuming this contains OpenCL utility functions like GetContext, AddSources, etc.
+#include <iomanip> //for floating point 
+#include "Utils.h" 
 #include "CImg.h"
 
 using namespace cimg_library;
@@ -20,9 +20,10 @@ void print_help() {
 int main(int argc, char **argv) {
     int platform_id = 0;
     int device_id = 0;
-    std::string image_filename = "mdr16.ppm"; // Default to 16-bit RGB PPM
-    int num_bins = 256; // Default number of bins
-    std::string scan_kernel_type = "bl"; // Default to Blelloch
+    //deafult settings unless stated 
+    std::string image_filename = "mdr16.ppm"; 
+    int num_bins = 256; 
+    std::string scan_kernel_type = "bl"; 
 
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-p") == 0) && (i < (argc - 1))) { platform_id = atoi(argv[++i]); }
@@ -46,10 +47,9 @@ int main(int argc, char **argv) {
     cimg::exception_mode(0);
 
     try {
-        // Load input image (16-bit or 8-bit with scaling)
+        //loading input image
         CImg<unsigned short> image_input;
 
-        // Check file header to determine bit depth
         FILE* file = fopen(image_filename.c_str(), "rb");
         if (!file) throw CImgIOException("Cannot open file");
         
@@ -72,12 +72,12 @@ int main(int argc, char **argv) {
 
         CImgDisplay disp_input(image_input, "Input Image");
 
-        // Setup OpenCL
+        //Setup OpenCL
         cl::Context context = GetContext(platform_id, device_id);
         std::cout << "Running on " << GetPlatformName(platform_id) << ", " << GetDeviceName(platform_id, device_id) << std::endl;
         cl::CommandQueue queue(context, context.getInfo<CL_CONTEXT_DEVICES>()[0], CL_QUEUE_PROFILING_ENABLE);
 
-        // Load and build kernel code
+        //loading kernels 
         cl::Program::Sources sources;
         AddSources(sources, "kernels/my_kernels.cl");
         cl::Program program(context, sources);
@@ -90,13 +90,13 @@ int main(int argc, char **argv) {
             throw err;
         }
 
-        // Image properties
+        //properties of the images
         size_t width = image_input.width();
         size_t height = image_input.height();
         size_t channels = image_input.spectrum(); // 1 for grayscale, 3 for RGB
         size_t image_size = width * height; // Size of one channel
 
-        // Separate channels
+        
         std::vector<CImg<unsigned short>> input_channels(channels);
         for (int c = 0; c < channels; c++) {
             input_channels[c] = CImg<unsigned short>(width, height, 1, 1);
@@ -105,7 +105,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        // Device buffers for each channel
+        //uffers for each channel
         std::vector<cl::Buffer> dev_image_input(channels);
         std::vector<cl::Buffer> dev_image_output(channels);
         std::vector<cl::Buffer> dev_histogram(channels);
@@ -120,7 +120,7 @@ int main(int argc, char **argv) {
             dev_lut[c] = cl::Buffer(context, CL_MEM_READ_WRITE, 65536 * sizeof(unsigned short));
         }
 
-        // Timing and metrics per step (per channel)
+        //metrics for each indivudal channel
         struct StepMetrics {
             double transfer_time = 0;
             double kernel_time = 0;
@@ -130,7 +130,7 @@ int main(int argc, char **argv) {
         };
         std::vector<std::vector<StepMetrics>> metrics(channels, std::vector<StepMetrics>(5));
 
-        // Visualization displays for each channel
+        // Visualization for each channel
         std::vector<CImgDisplay> disp_hist(channels);
         std::vector<CImgDisplay> disp_cum_hist(channels);
         std::vector<CImgDisplay> disp_norm_cum_hist(channels);
@@ -346,6 +346,7 @@ for (int c = 0; c < channels; c++) {
     std::cout << "  Span: " << metrics[c][4].span << " steps\n";
 
     std::cout << "\n";
+    
 
     double overall_total_time = metrics[c][0].total_time + metrics[c][1].total_time + metrics[c][2].total_time + 
                                 metrics[c][3].total_time + metrics[c][4].total_time;
