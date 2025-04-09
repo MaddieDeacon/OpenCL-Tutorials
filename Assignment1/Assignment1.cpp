@@ -21,7 +21,7 @@ int main(int argc, char **argv) {
     int device_id = 0;
     char image_filename[256] = "mdr16.ppm"; // C-style string with reasonable size
     int num_bins = 256;
-    char scan_kernel_type[3] = "hs"; // "bl" or "hs"
+    char scan_kernel_type[3] = "bl"; // "bl" or "hs"
 
     // Parse command-line arguments
     for (int i = 1; i < argc; i++) {
@@ -35,7 +35,7 @@ int main(int argc, char **argv) {
     }
 
     // Validate inputs
-    if (num_bins < 1 || num_bins > 1025) {
+    if (num_bins < 1 || num_bins > 2500) {
         std::cerr << "Error: Number of bins must be between 1 and 1025" << std::endl;
         return 1;
     }
